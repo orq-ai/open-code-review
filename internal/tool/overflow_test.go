@@ -22,11 +22,39 @@ func TestOverflowCapTruncatesAndNamesHandle(t *testing.T) {
 	store := NewOverflowStore(t.TempDir())
 	big := strings.Repeat("b", MaxToolResultBytes) + strings.Repeat("c", 5000)
 	capped := store.Cap(big)
-	if len(capped) >= len(big) {
-		t.Fatalf("oversized result was not truncated: %d bytes", len(capped))
+	if len(capped) > MaxToolResultBytes {
+		t.Fatalf("capped result is %d bytes, over the documented %d", len(capped), MaxToolResultBytes)
 	}
 	if !strings.Contains(capped, `handle "tr_1"`) {
 		t.Fatalf("truncation note does not name the handle: %q", capped)
+	}
+	// A tool writes its own header first; the cap has to override it, and a
+	// model reads the front of the message before the back.
+	if !strings.HasPrefix(capped, "IS_TRUNCATED: true\n") {
+		t.Fatalf("capped result does not lead with the truncation flag: %.60q", capped)
+	}
+}
+
+func TestOverflowReadFlagsAWindowThatIsNotTheWholeResult(t *testing.T) {
+	store := NewOverflowStore(t.TempDir())
+	store.Cap(strings.Repeat("b", MaxToolResultBytes*3))
+	p := NewOverflowRead(store)
+
+	partial, err := p.Execute(context.Background(), map[string]any{"handle": "tr_1", "offset": float64(0)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(partial, "IS_TRUNCATED: true\n") {
+		t.Fatalf("a window with bytes remaining is not flagged: %.60q", partial)
+	}
+
+	total := MaxToolResultBytes * 3
+	last, err := p.Execute(context.Background(), map[string]any{"handle": "tr_1", "offset": float64(total - 10)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(last, "IS_TRUNCATED: false\n") {
+		t.Fatalf("the final window is still flagged as truncated: %.60q", last)
 	}
 }
 

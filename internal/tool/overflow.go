@@ -30,6 +30,11 @@ var handlePattern = regexp.MustCompile(`^tr_[0-9]+$`)
 // side of fewer tokens than the target.
 const MaxToolResultBytes = 60_000
 
+// capFramingBytes is the room reserved inside MaxToolResultBytes for the
+// IS_TRUNCATED banner and the trailing handle note, so the cap bounds what the
+// model receives rather than only the content inside it.
+const capFramingBytes = 400
+
 // overflowReadMaxBytes bounds one tool_result_read window. Kept below
 // MaxToolResultBytes so a read never itself overflows.
 const overflowReadMaxBytes = 30_000
@@ -72,16 +77,23 @@ func (s *OverflowStore) Save(text string) (string, error) {
 // MaxToolResultBytes bytes plus a note naming the handle that holds the rest.
 // A store that fails to save still yields a truncated result: losing the tail
 // beats stopping the review.
+//
+// The result opens with IS_TRUNCATED, the key file_read already uses, because a
+// tool writes its own header before this cap sees the string: file_read reports
+// IS_TRUNCATED: false whenever it stayed inside its 500-line limit, which says
+// nothing about the byte cap applied afterwards. A model that read the header
+// first and the note last was observed spending a turn trying to reconcile the
+// two. Leading with the overriding value settles it before the content starts.
 func (s *OverflowStore) Cap(result string) string {
 	if s == nil || len(result) <= MaxToolResultBytes {
 		return result
 	}
-	head := truncateAtRune(result, MaxToolResultBytes)
+	head := truncateAtRune(result, MaxToolResultBytes-capFramingBytes)
 	handle, err := s.Save(result)
 	if err != nil {
-		return head + fmt.Sprintf("\n\n[TRUNCATED: %d bytes total, %d shown. The rest could not be saved (%v). Narrow the call — for code_search pass file_patterns, for file_read a smaller line range.]\n", len(result), len(head), err)
+		return fmt.Sprintf("IS_TRUNCATED: true\n%s\n\n[TRUNCATED: %d bytes total, %d shown. The rest could not be saved (%v). Narrow the call — for code_search pass file_patterns, for file_read a smaller line range.]\n", head, len(result), len(head), err)
 	}
-	return head + fmt.Sprintf("\n\n[TRUNCATED: %d bytes total, %d shown. The full output is saved as handle %q — read further with tool_result_read(handle=%q, offset=%d). Prefer narrowing the call: for code_search pass file_patterns, for file_read a smaller line range.]\n", len(result), len(head), handle, handle, len(head))
+	return fmt.Sprintf("IS_TRUNCATED: true\n%s\n\n[TRUNCATED: %d bytes total, %d shown. The full output is saved as handle %q — read further with tool_result_read(handle=%q, offset=%d). Prefer narrowing the call: for code_search pass file_patterns, for file_read a smaller line range.]\n", head, len(result), len(head), handle, handle, len(head))
 }
 
 // truncateAtRune cuts s to at most n bytes without splitting a UTF-8 rune.
@@ -140,7 +152,7 @@ func (p *OverflowReadProvider) Execute(_ context.Context, args map[string]any) (
 	next := offset + len(window)
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Handle: %s (Total bytes: %d)\nBYTE_RANGE: %d-%d\n", handle, len(data), offset, next)
+	fmt.Fprintf(&sb, "IS_TRUNCATED: %t\nHandle: %s (Total bytes: %d)\nBYTE_RANGE: %d-%d\n", next < len(data), handle, len(data), offset, next)
 	sb.WriteString(window)
 	if next < len(data) {
 		fmt.Fprintf(&sb, "\n\n[%d bytes remain; continue with offset=%d.]\n", len(data)-next, next)

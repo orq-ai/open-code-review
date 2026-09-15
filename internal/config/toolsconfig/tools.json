@@ -217,7 +217,7 @@
     "main_task": true,
     "definition": {
       "name": "tool_result_read",
-      "description": "Use this tool to read the rest of a tool result that was truncated. When a tool result exceeds the size limit, the result ends with a note naming a handle such as `tr_1`; pass that handle here to read further bytes.\n\n**Example output:**\nHandle: tr_1 (Total bytes: 547633)\nBYTE_RANGE: 32768-49152\nFile: path/to/example.json\n12|...\n\n**Limitations:**\n- At most 30000 bytes are returned per call; continue with the offset reported in the trailing note.\n- Handles are only valid within the current run.\n- Prefer narrowing the original call (`file_patterns` on code_search, a smaller line range on file_read) over paging through a large result.",
+      "description": "Use this tool to read the rest of a tool result that was truncated. When a tool result exceeds the size limit, the result ends with a note naming a handle such as `tr_1`; pass that handle here to read further bytes.\n\n**Example output:**\nIS_TRUNCATED: true\nHandle: tr_1 (Total bytes: 547633)\nBYTE_RANGE: 60000-90000\nFile: path/to/example.json\n12|...\n\n**Limitations:**\n- IS_TRUNCATED reports whether bytes remain after this window.\n- At most 30000 bytes are returned per call; continue with the offset reported in the trailing note.\n- Handles are only valid within the current run.\n- Prefer narrowing the original call (`file_patterns` on code_search, a smaller line range on file_read) over paging through a large result.",
       "parameters": {
         "type": "object",
         "properties": {
