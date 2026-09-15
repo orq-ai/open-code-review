@@ -700,3 +700,32 @@ func TestCodeSearchProvider_Execute_TruncatesAnEnormousMatchedLine(t *testing.T)
 		}
 	}
 }
+
+func TestCodeSearchProvider_Execute_ReportsBinaryFileMatches(t *testing.T) {
+	// A file marked -diff (or a real binary) makes git grep print
+	// "Binary file X matches" with no line number. That used to parse to
+	// nothing, and an empty tool result stops the review loop after a few
+	// rounds, so the note has to survive into the result.
+	dir := setupTestRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, ".gitattributes"), []byte("generated.html -diff\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "generated.html"), []byte("<p>needle</p>\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Mode: ModeWorkspace})
+	got, err := p.Execute(context.Background(), map[string]any{
+		"search_text":   "needle",
+		"file_patterns": []any{"generated.html"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(got) == "" {
+		t.Fatal("a matching binary file produced an empty result")
+	}
+	if !strings.Contains(got, "Binary file generated.html matches") {
+		t.Fatalf("binary-file note missing from result: %q", got)
+	}
+}

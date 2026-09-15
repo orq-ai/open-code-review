@@ -198,6 +198,12 @@ func (p *CodeSearchProvider) gitGrep(ctx context.Context, searchText string, cas
 		offset = 1
 	}
 
+	// git grep also emits lines that carry no line number — "Binary file X
+	// matches" for anything marked binary or -diff. Dropping them silently
+	// turned a successful grep into an empty tool result, which the review
+	// loop counts as an empty round and aborts on after a few of them.
+	var notes []string
+
 	var sb strings.Builder
 	if truncated {
 		sb.WriteString(fmt.Sprintf("Note: The results have been truncated. Only showing first %d results.\n", gitGrepMaxCount))
@@ -209,12 +215,14 @@ func (p *CodeSearchProvider) gitGrep(ctx context.Context, searchText string, cas
 		}
 		parts := strings.SplitN(line, ":", splitN)
 		if len(parts) < splitN {
+			notes = append(notes, line)
 			continue
 		}
 		fname := parts[offset]
 		m := match{}
 		ln, parseErr := strconv.Atoi(parts[offset+1])
 		if parseErr != nil {
+			notes = append(notes, line)
 			continue
 		}
 		m.lineNum = ln
@@ -236,6 +244,13 @@ func (p *CodeSearchProvider) gitGrep(ctx context.Context, searchText string, cas
 			sb.WriteString(fmt.Sprintf("%d|%s\n", m.lineNum, m.content))
 		}
 		sb.WriteString("\n")
+	}
+
+	for _, note := range notes {
+		if len(note) > gitGrepMaxLineBytes {
+			note = truncateAtRune(note, gitGrepMaxLineBytes-len(gitGrepTruncatedMark)) + gitGrepTruncatedMark
+		}
+		sb.WriteString(note + "\n")
 	}
 
 	if err != nil && errStr != "" {
