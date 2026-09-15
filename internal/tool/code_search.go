@@ -16,7 +16,12 @@ import (
 
 const (
 	gitGrepMaxCount = 100
-	gitGrepTimeout  = 10 * time.Second
+	// gitGrepMaxLineBytes caps one matched line, marker included. git grep
+	// prints the whole line, and generated reports or one-line JSON datasets
+	// run to megabytes, so an uncapped match crowds out every other result.
+	gitGrepMaxLineBytes  = 1000
+	gitGrepTruncatedMark = " …[line truncated]"
+	gitGrepTimeout       = 10 * time.Second
 )
 
 // CodeSearchProvider performs text search across the repository using git grep.
@@ -214,6 +219,9 @@ func (p *CodeSearchProvider) gitGrep(ctx context.Context, searchText string, cas
 		}
 		m.lineNum = ln
 		m.content = parts[offset+2]
+		if len(m.content) > gitGrepMaxLineBytes {
+			m.content = truncateAtRune(m.content, gitGrepMaxLineBytes-len(gitGrepTruncatedMark)) + gitGrepTruncatedMark
+		}
 		if !seen[fname] {
 			seen[fname] = true
 			fileOrder = append(fileOrder, fname)

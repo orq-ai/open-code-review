@@ -252,12 +252,26 @@ const args = process.argv.slice(2);
 fs.appendFileSync(process.env.OCR_NPM_CALLS, JSON.stringify(args) + "\\n");
 process.stdout.write("npm " + args.join(" ") + "\\n");
 `;
-  for (const [name, body] of [["ocr", ocrScript], ["npm", npmScript]]) {
+  // orq fork: the install step builds the CLI from source instead of
+  // installing the npm package, so the fixture needs a `go` that records its
+  // arguments and drops the fake `ocr` at the requested -o path. Every version
+  // gate below then still runs against OCR_FAKE_VERSION.
+  const goScript = `#!/usr/bin/env node
+const fs = require("fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.OCR_GO_CALLS, JSON.stringify(args) + "\\n");
+const outIndex = args.indexOf("-o");
+if (args[0] === "build" && outIndex !== -1) {
+  fs.copyFileSync(process.env.OCR_FAKE_BIN, args[outIndex + 1]);
+  fs.chmodSync(args[outIndex + 1], 0o755);
+}
+`;
+  for (const [name, body] of [["ocr", ocrScript], ["npm", npmScript], ["go", goScript]]) {
     const file = path.join(bin, name);
     fs.writeFileSync(file, body, { mode: 0o755 });
   }
 
-  return { dir, bin, callsPath, npmCallsPath, configPath, resultPath, stderrPath };
+  return { dir, bin, callsPath, npmCallsPath, goCallsPath: path.join(dir, "go-calls.jsonl"), configPath, resultPath, stderrPath };
 }
 
 function removeFixture(fixture) {
@@ -271,9 +285,14 @@ function runShell(script, env, fixture) {
       PATH: `${fixture.bin}:${process.env.PATH || ""}`,
       OCR_CALLS: fixture.callsPath,
       OCR_NPM_CALLS: fixture.npmCallsPath,
+      OCR_GO_CALLS: fixture.goCallsPath,
+      OCR_FAKE_BIN: path.join(fixture.bin, "ocr"),
+      RUNNER_TEMP: fixture.dir,
+      GITHUB_ACTION_PATH: ROOT,
       OCR_CONFIG: fixture.configPath,
       GITHUB_OUTPUT: path.join(fixture.dir, "github-output"),
       GITHUB_ENV: path.join(fixture.dir, "github-env"),
+      GITHUB_PATH: path.join(fixture.dir, "github-path"),
     }, env),
     encoding: "utf8",
   });
@@ -1300,7 +1319,7 @@ function testRunFailsClosedWhenValidatedTaskTimeoutIsMissing() {
   }
 }
 
-function testOfficialNpmPackageInstallIsPreserved() {
+function testForkBuildsCLIFromSource() {
   const install = installStep();
   assert.ok(install, "action.yml must retain the Install OpenCodeReview step");
   const fixture = makeFixture();
@@ -1308,10 +1327,11 @@ function testOfficialNpmPackageInstallIsPreserved() {
     const values = inputValues({ ocr_version: "1.9.10" });
     const result = runStep(install, values, fixture);
     assert.strictEqual(result.status, 0, `Install OpenCodeReview shell block failed; ${resultDescription(result)}`);
-    const npmCall = readJsonLines(fixture.npmCallsPath).find((args) => args[0] === "install");
-    assert.ok(npmCall, "Install OpenCodeReview must invoke npm install");
-    assert.deepStrictEqual(npmCall.slice(0, 2), ["install", "-g"]);
-    assert.strictEqual(npmCall[2], "@alibaba-group/open-code-review@1.9.10");
+    assert.deepStrictEqual(readJsonLines(fixture.npmCallsPath), [], "the fork must not install the upstream npm package");
+    const goCall = readJsonLines(fixture.goCallsPath).find((args) => args[0] === "build");
+    assert.ok(goCall, "Install OpenCodeReview must build the CLI from source");
+    const ldflags = goCall[goCall.indexOf("-ldflags") + 1] || "";
+    assert.match(ldflags, /-X main\.Version=\d+\.\d+\.\d+\+orq\./, "the fork build must stamp a +orq version");
   } finally {
     removeFixture(fixture);
   }
@@ -1505,7 +1525,7 @@ function testRequiredStepTopologyAndEnvironmentContracts() {
       "LLM_REASONING_EFFORT_INPUT",
       "STREAM_PROGRESS_INPUT",
     ],
-    "Install OpenCodeReview": ["OCR_VERSION"],
+    "Install OpenCodeReview": ["OCR_FORK_VERSION"],
     "Configure OCR": [
       "OCR_LLM_URL",
       "OCR_LLM_MODEL",
@@ -1620,7 +1640,7 @@ const TESTS = [
   ["Configure OCR clears stale persisted retry codes", testConfigureClearsStaleRetryCodesBeforeEndpointConfig],
   ["Run OpenCodeReview retains the extra-headers env override", testRunRetainsExtraHeadersEnvironmentOverride],
   ["Run OpenCodeReview fails closed without validated task timeout", testRunFailsClosedWhenValidatedTaskTimeoutIsMissing],
-  ["the official OpenCodeReview NPM install is preserved", testOfficialNpmPackageInstallIsPreserved],
+  ["the fork builds the CLI from source instead of installing the npm package", testForkBuildsCLIFromSource],
   ["Install OpenCodeReview enforces the auth_token_cmd version floor", testInstallEnforcesAuthTokenCommandVersionFloor],
   ["Install OpenCodeReview rejects the effort input below v1.10.0", testInstallRejectsEffortBelowV1100],
   ["Install OpenCodeReview rejects stream_progress below v1.9.8", testInstallRejectsStreamProgressBelowV198],

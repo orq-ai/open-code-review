@@ -232,3 +232,57 @@ func captureToolTerminal(t *testing.T, fn func()) (string, string) {
 	}
 	return progress.String(), string(errBytes)
 }
+
+// hugeProvider returns more than one tool result is allowed to carry.
+type hugeProvider struct{ payload string }
+
+func (p *hugeProvider) Tool() tool.Tool { return tool.Dynamic("dyn_huge") }
+func (p *hugeProvider) Execute(_ context.Context, _ map[string]any) (string, error) {
+	return p.payload, nil
+}
+
+// TestExecuteToolCall_CapsOversizedResults covers the wiring, not the store:
+// an unbounded tool result must be capped before it becomes a message, and the
+// session record must hold what the model actually saw.
+func TestExecuteToolCall_CapsOversizedResults(t *testing.T) {
+	payload := strings.Repeat("x", tool.MaxToolResultBytes*2)
+	reg := tool.NewRegistry()
+	reg.Register(&hugeProvider{payload: payload})
+	store := tool.NewOverflowStore(t.TempDir())
+	reg.SetOverflow(store)
+	reg.Freeze()
+	r := NewRunner(Deps{Tools: reg, CommentCollector: tool.NewCommentCollector()})
+
+	rec := &session.TaskRecord{}
+	cp := r.executeToolCall(context.Background(), "file.go", llm.ToolCall{
+		Function: llm.FunctionCall{Name: "dyn_huge", Arguments: `{}`},
+	}, rec, "")
+
+	if len(cp.Data) >= len(payload) {
+		t.Fatalf("oversized tool result reached the conversation uncapped: %d bytes", len(cp.Data))
+	}
+	if !strings.Contains(cp.Data, "tool_result_read") {
+		t.Fatalf("capped result does not tell the model how to read the rest: %q", cp.Data[len(cp.Data)-200:])
+	}
+	if got := rec.ToolResults[0].Result; got != cp.Data {
+		t.Fatalf("session record holds %d bytes, the model saw %d", len(got), len(cp.Data))
+	}
+}
+
+// A registry built without a store is the no-op configuration every other test
+// in this package relies on; capping must not require one.
+func TestExecuteToolCall_WithoutOverflowStore(t *testing.T) {
+	payload := strings.Repeat("x", tool.MaxToolResultBytes*2)
+	reg := tool.NewRegistry()
+	reg.Register(&hugeProvider{payload: payload})
+	reg.Freeze()
+	r := NewRunner(Deps{Tools: reg, CommentCollector: tool.NewCommentCollector()})
+
+	cp := r.executeToolCall(context.Background(), "file.go", llm.ToolCall{
+		Function: llm.FunctionCall{Name: "dyn_huge", Arguments: `{}`},
+	}, nil, "")
+
+	if cp.Data != payload {
+		t.Fatalf("result was altered without a store attached")
+	}
+}

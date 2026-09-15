@@ -204,7 +204,8 @@ func executeReviewContext(ctx context.Context, opts reviewOptions) (retErr error
 		Ref:     fileReadRef(mode, opts, sealedInput),
 		Runner:  cc.GitRunner,
 	}
-	tools := buildToolRegistry(rt.Collector, fileReader)
+	tools, closeOverflow := buildToolRegistry(rt.Collector, fileReader)
+	defer closeOverflow()
 
 	mcpClients := initMCPClients(ctx, rt.AppCfg, tools, cc.RepoDir, Version)
 	defer closeReviewMCPClients(mcpClients)
@@ -608,12 +609,23 @@ var closeReviewMCPClients = func(clients []*mcp.Client) {
 	}
 }
 
-func buildToolRegistry(collector *tool.CommentCollector, fr *tool.FileReader) *tool.Registry {
+func buildToolRegistry(collector *tool.CommentCollector, fr *tool.FileReader) (*tool.Registry, func()) {
 	reg := tool.NewRegistry()
 	reg.Register(tool.NewFileRead(fr))
 	reg.Register(tool.NewFileFind(fr))
 	reg.Register(tool.NewFileReadDiff(tool.DiffMap{}))
 	reg.Register(tool.NewCodeSearch(fr))
 	reg.Register(&tool.CodeCommentProvider{Collector: collector})
-	return reg
+
+	// Oversized tool results are spilled next to the session data rather than
+	// into the repository: review mode reads files at a git ref, so a scratch
+	// file in the worktree would be unreadable, and it would dirty the diff.
+	store := tool.NewOverflowStore(filepath.Join(os.TempDir(), fmt.Sprintf("ocr-tool-results-%d", os.Getpid())))
+	reg.SetOverflow(store)
+	reg.Register(tool.NewOverflowRead(store))
+	return reg, func() {
+		if err := store.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "[ocr] WARNING: remove spilled tool results: %v\n", err)
+		}
+	}
 }

@@ -674,3 +674,29 @@ func TestBuildGrepArgs_NoIndex(t *testing.T) {
 	assertContains(t, args, "--exclude-standard")
 	assertNotContains(t, args, "--untracked")
 }
+
+func TestCodeSearchProvider_Execute_TruncatesAnEnormousMatchedLine(t *testing.T) {
+	// A generated report or a one-line JSON dataset is a single line of
+	// megabytes; git grep prints it in full, which is what exhausted a review's
+	// context window and motivated the cap.
+	dir := setupTestRepo(t)
+	line := "needle " + strings.Repeat("x", 500_000) + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "generated.json"), []byte(line), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Mode: ModeWorkspace})
+	got, err := p.Execute(context.Background(), map[string]any{"search_text": "needle"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, gitGrepTruncatedMark) {
+		t.Fatalf("oversized line was not marked as truncated: %.200s", got)
+	}
+	for _, out := range strings.Split(got, "\n") {
+		_, content, isMatch := strings.Cut(out, "|")
+		if isMatch && len(content) > gitGrepMaxLineBytes {
+			t.Fatalf("emitted match is %d bytes, over the documented %d", len(content), gitGrepMaxLineBytes)
+		}
+	}
+}

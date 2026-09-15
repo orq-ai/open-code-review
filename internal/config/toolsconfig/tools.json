@@ -103,7 +103,7 @@
     "main_task": true,
     "definition": {
       "name": "code_search",
-      "description": "Use this tool to search for specific text within files. Supports searching in specific files, directories, or across the entire codebase with flexible file pattern filtering. Can use either exact string matching or regular expressions.\n\n**Example output:**\nSearch results for 'toolRequest' (case-insensitive):\nFile: path/to/example.java\n433|      String name = toolRequest.get().getName();\n438|      logToolRequest(newPath, tool, toolRequest.get());\n\n**Regular expression examples (requires use_perl_regexp: true):**\n- Find classes that extend BaseModel: 'class.*extends.*BaseModel'\n- Find function: 'functionName(.*)'\n- Find the function call sites: '\\.functionName(.*)'\n- Match any of multiple strings: 'error|exception|fail'\n\n**File patterns examples:**\n- Single file: ['src/main.go']\n- Multiple files: ['src/main.go', 'lib/utils.js']\n- All Go files: ['*.go']\n- Exclude test files: [':(exclude)*_test.go']\n- Only in src directory: ['src/']\n- Multiple patterns: ['*.go', ':(exclude)vendor/']\n\n**Limitations:**\n- If more than 100 matches are found, only the first 100 results will be returned.\n- Empty search terms will return no results.\n- This tool searches in the current version of files.",
+      "description": "Use this tool to search for specific text within files. Supports searching in specific files, directories, or across the entire codebase with flexible file pattern filtering. Can use either exact string matching or regular expressions.\n\n**Example output:**\nSearch results for 'toolRequest' (case-insensitive):\nFile: path/to/example.java\n433|      String name = toolRequest.get().getName();\n438|      logToolRequest(newPath, tool, toolRequest.get());\n\n**Regular expression examples (requires use_perl_regexp: true):**\n- Find classes that extend BaseModel: 'class.*extends.*BaseModel'\n- Find function: 'functionName(.*)'\n- Find the function call sites: '\\.functionName(.*)'\n- Match any of multiple strings: 'error|exception|fail'\n\n**File patterns examples:**\n- Single file: ['src/main.go']\n- Multiple files: ['src/main.go', 'lib/utils.js']\n- All Go files: ['*.go']\n- Exclude test files: [':(exclude)*_test.go']\n- Only in src directory: ['src/']\n- Multiple patterns: ['*.go', ':(exclude)vendor/']\n\n**Limitations:**\n- If more than 100 matches are found, only the first 100 results will be returned.\n- A single matched line longer than 1000 bytes is truncated; use `file_read` on that file if you need the rest.\n- Empty search terms will return no results.\n- This tool searches in the current version of files.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -207,6 +207,35 @@
         },
         "required": [
           "query_name"
+        ]
+      }
+    }
+  },
+  {
+    "name": "tool_result_read",
+    "plan_task": true,
+    "main_task": true,
+    "definition": {
+      "name": "tool_result_read",
+      "description": "Use this tool to read the rest of a tool result that was truncated. When a tool result exceeds the size limit, the result ends with a note naming a handle such as `tr_1`; pass that handle here to read further bytes.\n\n**Example output:**\nHandle: tr_1 (Total bytes: 547633)\nBYTE_RANGE: 32768-49152\nFile: path/to/example.json\n12|...\n\n**Limitations:**\n- At most 30000 bytes are returned per call; continue with the offset reported in the trailing note.\n- Handles are only valid within the current run.\n- Prefer narrowing the original call (`file_patterns` on code_search, a smaller line range on file_read) over paging through a large result.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "handle": {
+            "type": "string",
+            "description": "The handle reported in the truncation note, e.g. 'tr_1'."
+          },
+          "offset": {
+            "type": "integer",
+            "description": "Byte offset to start reading from. Defaults to 0."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum number of bytes to return. Capped at 30000."
+          }
+        },
+        "required": [
+          "handle"
         ]
       }
     }

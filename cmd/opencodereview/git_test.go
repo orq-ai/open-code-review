@@ -164,8 +164,12 @@ func TestValidateReviewRefs_EmptySkipped(t *testing.T) {
 }
 
 func TestBuildToolRegistry(t *testing.T) {
-	reg := buildToolRegistry(nil, nil)
+	reg, closeOverflow := buildToolRegistry(nil, nil)
+	defer closeOverflow()
 	if reg == nil {
 		t.Fatal("expected non-nil registry")
+	}
+	if reg.Overflow() == nil {
+		t.Fatal("expected an overflow store to bound tool results")
 	}
 }

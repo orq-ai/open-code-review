@@ -444,12 +444,28 @@ runs:
         esac
         echo "STREAM_PROGRESS=$NORMALIZED_STREAM_PROGRESS" >> "$GITHUB_ENV"
 
+    # orq fork: upstream installs a published npm package that downloads a
+    # release binary. The fork carries source-only patches and publishes
+    # nothing, so it builds the CLI from the action checkout instead. The
+    # ocr_version input is ignored; OCR_FORK_VERSION below is the version the
+    # gates downstream see, and it must be bumped when rebasing on upstream.
+    - name: Set up Go
+      uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+      with:
+        go-version: '1.25.5'
+        cache: false
+
     - name: Install OpenCodeReview
       shell: bash
       env:
-        OCR_VERSION: ${{ inputs.ocr_version }}
+        OCR_FORK_VERSION: 1.12.1+orq.1
       run: |
-        npm install -g "@alibaba-group/open-code-review@${OCR_VERSION}"
+        OCR_BIN_DIR="${RUNNER_TEMP}/ocr-bin"
+        mkdir -p "$OCR_BIN_DIR"
+        (cd "$GITHUB_ACTION_PATH" && go build -ldflags "-X main.Version=${OCR_FORK_VERSION}" -o "$OCR_BIN_DIR/ocr" ./cmd/opencodereview)
+        # GITHUB_PATH only affects later steps, so export for this one too.
+        export PATH="$OCR_BIN_DIR:$PATH"
+        echo "$OCR_BIN_DIR" >> "$GITHUB_PATH"
         echo "OpenCodeReview installed:"
         OCR_VERSION_OUTPUT="$(ocr version 2>/dev/null)" || {
           echo "::error::Unable to read the installed OpenCodeReview version"

@@ -199,7 +199,8 @@ func executeScan(opts scanOptions) (retErr error) {
 		Mode:    tool.ModeWorkspace,
 		Runner:  cc.GitRunner,
 	}
-	tools := buildToolRegistry(rt.Collector, fileReader)
+	tools, closeOverflow := buildToolRegistry(rt.Collector, fileReader)
+	defer closeOverflow()
 
 	ag := scan.NewAgent(scan.Args{
 		RepoDir:               cc.RepoDir,

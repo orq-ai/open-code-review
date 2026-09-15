@@ -776,6 +776,7 @@ func (r *Runner) executeToolCall(ctx context.Context, taskKey string, call llm.T
 		return tool.Of(fmt.Sprintf("Error executing tool %s: %v", toolName, err))
 	}
 	telemetry.PrintToolCallFinished(toolName, dur)
+	result = r.deps.Tools.Overflow().Cap(result)
 	if rec != nil {
 		rec.AddToolResult(toolName, call.Function.Arguments, result)
 	}

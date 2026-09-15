@@ -15,13 +15,14 @@ type Tool struct {
 }
 
 var (
-	Unknown      = Tool{name: "unknown"}
-	TaskDone     = Tool{name: "task_done"}
-	CodeComment  = Tool{name: "code_comment"}
-	FileRead     = Tool{name: "file_read"}
-	FileFind     = Tool{name: "file_find"}
-	FileReadDiff = Tool{name: "file_read_diff"}
-	CodeSearch   = Tool{name: "code_search"}
+	Unknown        = Tool{name: "unknown"}
+	TaskDone       = Tool{name: "task_done"}
+	CodeComment    = Tool{name: "code_comment"}
+	FileRead       = Tool{name: "file_read"}
+	FileFind       = Tool{name: "file_find"}
+	FileReadDiff   = Tool{name: "file_read_diff"}
+	CodeSearch     = Tool{name: "code_search"}
+	ToolResultRead = Tool{name: "tool_result_read"}
 )
 
 func OfName(name string) Tool {
@@ -34,7 +35,7 @@ func OfName(name string) Tool {
 }
 
 func allTools() []Tool {
-	return []Tool{Unknown, TaskDone, CodeComment, FileRead, FileFind, FileReadDiff, CodeSearch}
+	return []Tool{Unknown, TaskDone, CodeComment, FileRead, FileFind, FileReadDiff, CodeSearch, ToolResultRead}
 }
 
 // IsReserved reports whether name matches any built-in tool name (including Unknown).
@@ -79,7 +80,23 @@ type Provider interface {
 type Registry struct {
 	providers map[string]Provider
 	frozen    bool
+	// overflow bounds the size of a single tool result. Nil leaves results
+	// unchanged, which is what a registry built without one does.
+	overflow *OverflowStore
 }
+
+// SetOverflow attaches the store used to cap and spill oversized results.
+// Panics if the registry is frozen: Overflow is read concurrently by every
+// in-flight tool call once the review fans out.
+func (r *Registry) SetOverflow(s *OverflowStore) {
+	if r.frozen {
+		panic("tool: SetOverflow called on frozen registry")
+	}
+	r.overflow = s
+}
+
+// Overflow returns the attached store, or nil.
+func (r *Registry) Overflow() *OverflowStore { return r.overflow }
 
 // NewRegistry creates an empty, mutable registry.
 func NewRegistry() *Registry {
