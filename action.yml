@@ -19,16 +19,20 @@ inputs:
     required: true
   llm_use_anthropic:
     description: >-
-      Selects the LLM protocol (mapped to env OCR_USE_ANTHROPIC). An explicitly supplied empty
-      string, true, 1, or yes selects Anthropic
+      Deprecated two-way toggle, superseded by llm_protocol. An explicitly
+      supplied empty string, true, 1, or yes selects Anthropic
       case-insensitively; every other value selects the OpenAI-compatible
-      protocol, preserving the CLI environment contract.
-    required: true
+      protocol, preserving the CLI environment contract. Read only when
+      llm_protocol is empty, and rejected when the two disagree about
+      Anthropic. Omitting both leaves the Anthropic default in place.
+    required: false
+    default: ''
   llm_protocol:
     description: >-
-      LLM protocol, one of anthropic, openai, openai-responses
-      (case-insensitive). Wins over llm_use_anthropic when set; empty
-      (default) leaves that input in charge. openai-responses speaks the
+      The protocol the action speaks, one of anthropic, openai,
+      openai-responses (case-insensitive). This is the field to set;
+      llm_use_anthropic is the legacy spelling of the same choice and is
+      consulted only when this is empty. openai-responses speaks the
       OpenAI Responses API (/v1/responses), which is what GPT-5.x and
       o-series models expect; llm_url is normalized to end in /responses.
       anthropic-bedrock is not selectable here — it derives its host from a
@@ -378,6 +382,7 @@ runs:
         MAX_TOKENS_BUDGET_INPUT: ${{ inputs.max_tokens_budget }}
         LLM_REASONING_EFFORT_INPUT: ${{ inputs.llm_reasoning_effort }}
         LLM_PROTOCOL_INPUT: ${{ inputs.llm_protocol }}
+        LLM_USE_ANTHROPIC_INPUT: ${{ inputs.llm_use_anthropic }}
         STREAM_PROGRESS_INPUT: ${{ inputs.stream_progress }}
       shell: bash
       run: |
@@ -444,12 +449,13 @@ runs:
         esac
         echo "LLM_REASONING_EFFORT=$NORMALIZED_LLM_REASONING_EFFORT" >> "$GITHUB_ENV"
 
-        # Empty defers to llm_use_anthropic; otherwise one of the CLI's three
-        # url+token protocols. anthropic-bedrock is rejected here rather than
-        # passed on: the CLI refuses it from the environment strategy anyway,
-        # and failing in the action names the reason once. This list mirrors
-        # protocol.go's constants minus that one; the action contract suite
-        # asserts the two agree, so a fifth protocol cannot land in Go alone.
+        # One of the CLI's three url+token protocols, or empty to fall back to
+        # the legacy llm_use_anthropic toggle. anthropic-bedrock is rejected
+        # here rather than passed on: the CLI refuses it from the environment
+        # strategy anyway, and failing in the action names the reason once.
+        # This list mirrors protocol.go's constants minus that one; the action
+        # contract suite asserts the two agree, so a fifth protocol cannot land
+        # in Go alone.
         NORMALIZED_LLM_PROTOCOL="$(printf '%s' "$LLM_PROTOCOL_INPUT" | tr '[:upper:]' '[:lower:]')"
         case "$NORMALIZED_LLM_PROTOCOL" in
           ""|anthropic|openai|openai-responses) ;;
@@ -458,7 +464,27 @@ runs:
             exit 1
             ;;
         esac
-        echo "LLM_PROTOCOL=$NORMALIZED_LLM_PROTOCOL" >> "$GITHUB_ENV"
+        # The protocol is resolved exactly once, here, so every later step
+        # reads one value instead of re-deriving it from two inputs that can
+        # disagree. The legacy toggle only ever expressed "Anthropic or not",
+        # so it is compared on that axis alone: llm_protocol openai-responses
+        # alongside llm_use_anthropic false is a refinement, not a conflict,
+        # while llm_use_anthropic true alongside it is a contradiction the run
+        # would otherwise resolve silently.
+        NORMALIZED_USE_ANTHROPIC="$(printf '%s' "$LLM_USE_ANTHROPIC_INPUT" | tr '[:upper:]' '[:lower:]')"
+        case "$NORMALIZED_USE_ANTHROPIC" in
+          ""|true|1|yes) LEGACY_PROTOCOL=anthropic ;;
+          *) LEGACY_PROTOCOL=openai ;;
+        esac
+        if [ -n "$NORMALIZED_LLM_PROTOCOL" ] && [ -n "$NORMALIZED_USE_ANTHROPIC" ]; then
+          if { [ "$LEGACY_PROTOCOL" = anthropic ] && [ "$NORMALIZED_LLM_PROTOCOL" != anthropic ]; } ||
+             { [ "$LEGACY_PROTOCOL" != anthropic ] && [ "$NORMALIZED_LLM_PROTOCOL" = anthropic ]; }; then
+            echo "::error::llm_protocol '$NORMALIZED_LLM_PROTOCOL' contradicts llm_use_anthropic '$LLM_USE_ANTHROPIC_INPUT'; set llm_protocol alone"
+            exit 1
+          fi
+        fi
+        RESOLVED_LLM_PROTOCOL="${NORMALIZED_LLM_PROTOCOL:-$LEGACY_PROTOCOL}"
+        echo "LLM_PROTOCOL=$RESOLVED_LLM_PROTOCOL" >> "$GITHUB_ENV"
 
         # Display-only toggle: 'true' streams human-audience progress lines to
         # the workflow log, 'false' keeps the silent agent-audience run. It
@@ -489,7 +515,7 @@ runs:
     - name: Install OpenCodeReview
       shell: bash
       env:
-        OCR_FORK_VERSION: 1.12.1+orq.2
+        OCR_FORK_VERSION: 1.12.1+orq.3
       run: |
         OCR_BIN_DIR="${RUNNER_TEMP}/ocr-bin"
         mkdir -p "$OCR_BIN_DIR"
@@ -550,36 +576,24 @@ runs:
       env:
         OCR_LLM_URL: ${{ inputs.llm_url }}
         OCR_LLM_MODEL: ${{ inputs.llm_model }}
-        OCR_USE_ANTHROPIC: ${{ inputs.llm_use_anthropic }}
         OCR_LLM_AUTH_HEADER: ${{ inputs.llm_auth_header }}
         OCR_EXTRA_BODY: ${{ inputs.llm_extra_body }}
         OCR_LANGUAGE: ${{ inputs.language }}
       shell: bash
       run: |
-        NORMALIZED_USE_ANTHROPIC="$(printf '%s' "$OCR_USE_ANTHROPIC" | tr '[:upper:]' '[:lower:]')"
-        case "$NORMALIZED_USE_ANTHROPIC" in
-          ""|true|1|yes)
-            OCR_USE_ANTHROPIC="true"
-            OCR_LLM_PROTOCOL="anthropic"
-            ;;
-          *)
-            OCR_USE_ANTHROPIC="false"
-            OCR_LLM_PROTOCOL="openai"
-            ;;
-        esac
-        # llm_protocol, validated and normalized by the Validate inputs step,
-        # wins over the two-way llm_use_anthropic toggle: the toggle cannot
-        # name the Responses API at all. This step's config file is the only
-        # thing that carries the choice to the CLI — ResolveEndpoint tries the
-        # config file before the environment (internal/llm/resolver.go), so an
-        # OCR_LLM_PROTOCOL on the review step would never be read.
-        if [ -n "${LLM_PROTOCOL:-}" ]; then
-          OCR_LLM_PROTOCOL="$LLM_PROTOCOL"
-          if [ "$OCR_LLM_PROTOCOL" = "anthropic" ]; then
-            OCR_USE_ANTHROPIC="true"
-          else
-            OCR_USE_ANTHROPIC="false"
-          fi
+        # LLM_PROTOCOL is resolved once by the Validate inputs step, from
+        # llm_protocol or the legacy llm_use_anthropic toggle, and is never
+        # empty here. use_anthropic is written alongside it because the CLI
+        # still reads both keys; it is derived, not an independent choice.
+        # This step's config file is the only thing that carries the protocol
+        # to the CLI — ResolveEndpoint tries the config file before the
+        # environment (internal/llm/resolver.go), so an OCR_LLM_PROTOCOL on
+        # the review step would never be read.
+        OCR_LLM_PROTOCOL="$LLM_PROTOCOL"
+        if [ "$OCR_LLM_PROTOCOL" = "anthropic" ]; then
+          OCR_USE_ANTHROPIC="true"
+        else
+          OCR_USE_ANTHROPIC="false"
         fi
         # reasoning_effort is Chat Completions vocabulary. Anthropic rejects
         # unknown body fields and the Responses API takes reasoning.effort
@@ -665,7 +679,6 @@ runs:
         # alike and a checkpoint survives a change that should have killed it.
         OCR_FP_LLM_URL: ${{ inputs.llm_url }}
         OCR_FP_LLM_MODEL: ${{ inputs.llm_model }}
-        OCR_FP_LLM_USE_ANTHROPIC: ${{ inputs.llm_use_anthropic }}
         OCR_FP_LLM_PROTOCOL: ${{ env.LLM_PROTOCOL }}
         OCR_FP_LANGUAGE: ${{ inputs.language }}
         OCR_FP_LLM_EXTRA_BODY: ${{ inputs.llm_extra_body }}
@@ -808,7 +821,6 @@ runs:
               .update(JSON.stringify([
                 process.env.OCR_FP_LLM_URL,
                 process.env.OCR_FP_LLM_MODEL,
-                process.env.OCR_FP_LLM_USE_ANTHROPIC,
                 process.env.OCR_FP_LLM_PROTOCOL,
                 process.env.OCR_FP_LANGUAGE,
                 process.env.OCR_FP_LLM_EXTRA_BODY,
@@ -885,7 +897,6 @@ runs:
         OCR_LLM_URL: ${{ inputs.llm_url }}
         OCR_LLM_TOKEN: ${{ inputs.llm_auth_token }}
         OCR_LLM_MODEL: ${{ inputs.llm_model }}
-        OCR_USE_ANTHROPIC: ${{ inputs.llm_use_anthropic }}
         OCR_LLM_AUTH_HEADER: ${{ inputs.llm_auth_header }}
         OCR_LLM_EXTRA_HEADERS: ${{ inputs.llm_extra_headers }}
         OCR_LLM_TIMEOUT: ${{ inputs.llm_timeout }}
