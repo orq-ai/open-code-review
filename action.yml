@@ -447,8 +447,10 @@ runs:
         # Empty defers to llm_use_anthropic; otherwise one of the CLI's three
         # url+token protocols. anthropic-bedrock is rejected here rather than
         # passed on: the CLI refuses it from the environment strategy anyway,
-        # and failing in the action names the reason once.
-        NORMALIZED_LLM_PROTOCOL="$(printf '%s' "$LLM_PROTOCOL_INPUT" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+        # and failing in the action names the reason once. This list mirrors
+        # protocol.go's constants minus that one; the action contract suite
+        # asserts the two agree, so a fifth protocol cannot land in Go alone.
+        NORMALIZED_LLM_PROTOCOL="$(printf '%s' "$LLM_PROTOCOL_INPUT" | tr '[:upper:]' '[:lower:]')"
         case "$NORMALIZED_LLM_PROTOCOL" in
           ""|anthropic|openai|openai-responses) ;;
           *)
@@ -566,10 +568,11 @@ runs:
             ;;
         esac
         # llm_protocol, validated and normalized by the Validate inputs step,
-        # wins over the two-way llm_use_anthropic toggle when it is set — the
-        # toggle cannot name the Responses API at all. use_anthropic is kept in
-        # sync so the legacy fallback agrees with the protocol rather than
-        # contradicting it.
+        # wins over the two-way llm_use_anthropic toggle: the toggle cannot
+        # name the Responses API at all. This step's config file is the only
+        # thing that carries the choice to the CLI — ResolveEndpoint tries the
+        # config file before the environment (internal/llm/resolver.go), so an
+        # OCR_LLM_PROTOCOL on the review step would never be read.
         if [ -n "${LLM_PROTOCOL:-}" ]; then
           OCR_LLM_PROTOCOL="$LLM_PROTOCOL"
           if [ "$OCR_LLM_PROTOCOL" = "anthropic" ]; then
@@ -883,11 +886,6 @@ runs:
         OCR_LLM_TOKEN: ${{ inputs.llm_auth_token }}
         OCR_LLM_MODEL: ${{ inputs.llm_model }}
         OCR_USE_ANTHROPIC: ${{ inputs.llm_use_anthropic }}
-        # The CLI's environment strategy outranks the config file written by
-        # the Configure OCR step, and OCR_USE_ANTHROPIC above would otherwise
-        # decide the protocol on its own. Pass the resolved value through so
-        # the two agree. Empty leaves OCR_USE_ANTHROPIC in charge, as before.
-        OCR_LLM_PROTOCOL: ${{ env.LLM_PROTOCOL }}
         OCR_LLM_AUTH_HEADER: ${{ inputs.llm_auth_header }}
         OCR_LLM_EXTRA_HEADERS: ${{ inputs.llm_extra_headers }}
         OCR_LLM_TIMEOUT: ${{ inputs.llm_timeout }}
