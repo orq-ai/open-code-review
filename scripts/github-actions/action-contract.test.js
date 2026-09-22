@@ -364,6 +364,29 @@ function escapedRegExp(value) {
   return new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
 }
 
+// The Configure step no longer derives the protocol itself: Validate inputs
+// resolves llm_protocol and the legacy llm_use_anthropic toggle into one
+// LLM_PROTOCOL, and Configure reads that. Running the real validation here
+// keeps these contracts on the same path a workflow takes, instead of
+// hand-feeding a protocol the inputs might not produce.
+function resolvedProtocol(values, fixture) {
+  const step = validationStep();
+  assert.ok(step, "action.yml must keep the Validate inputs step");
+  const result = runStep(step, values, fixture);
+  assert.strictEqual(result.status, 0, `Validate inputs failed; ${resultDescription(result)}`);
+  const resolved = readEnvAssignments(path.join(fixture.dir, "github-env")).LLM_PROTOCOL;
+  assert.ok(resolved, "Validate inputs must export a non-empty LLM_PROTOCOL");
+  return resolved;
+}
+
+function runConfigure(values, fixture, extraEnv = {}) {
+  const configure = stepNamed("Configure OCR");
+  assert.ok(configure, "action.yml must retain the Configure OCR step");
+  const env = Object.assign({}, extraEnv);
+  if (env.LLM_PROTOCOL === undefined) env.LLM_PROTOCOL = resolvedProtocol(values, fixture);
+  return runStep(configure, values, fixture, env);
+}
+
 function assertValidation(value, expectedValid) {
   const step = validationStep();
   assert.ok(step, "action.yml must add a validation step that references review_task_timeout");
@@ -926,7 +949,7 @@ function testConfigureMergesReasoningEffortIntoExtraBody() {
     const fixture = makeFixture();
     try {
       const values = inputValues(Object.assign({}, baseValues, overrides));
-      const result = runStep(configure, values, fixture, extraEnv);
+      const result = runConfigure(values, fixture, extraEnv);
       assert.strictEqual(result.status, 0, `Configure OCR failed for "${label}"; ${resultDescription(result)}`);
       const configured = configValues(readJsonLines(fixture.configPath));
       const body =
@@ -951,11 +974,159 @@ function testConfigureRejectsReasoningEffortOnAnthropic() {
       llm_use_anthropic: "true",
       llm_auth_token: "unused-token",
     });
-    const result = runStep(configure, values, fixture, { LLM_REASONING_EFFORT: "low" });
+    const result = runConfigure(values, fixture, { LLM_REASONING_EFFORT: "low" });
     assert.notStrictEqual(result.status, 0, "Configure OCR must reject llm_reasoning_effort on the anthropic protocol");
     assert.match(
       `${result.stdout}\n${result.stderr}`,
-      /::error::llm_reasoning_effort is supported only with OpenAI-compatible protocols/,
+      /::error::llm_reasoning_effort is supported only with the openai \(Chat Completions\) protocol/,
+      `the failure must name the llm_reasoning_effort input; ${resultDescription(result)}`
+    );
+  } finally {
+    removeFixture(fixture);
+  }
+}
+
+function testValidateRejectsUnknownProtocol() {
+  const validate = stepNamed("Validate inputs");
+  assert.ok(validate, "action.yml must retain the Validate inputs step");
+  for (const rejected of ["anthropic-bedrock", "openai responses", "responses"]) {
+    const fixture = makeFixture();
+    try {
+      const values = inputValues({ llm_protocol: rejected });
+      const result = runStep(validate, values, fixture);
+      assert.notStrictEqual(result.status, 0, `Validate inputs must reject llm_protocol=${rejected}`);
+      assert.match(
+        `${result.stdout}\n${result.stderr}`,
+        /::error::llm_protocol must be one of: anthropic, openai, openai-responses/,
+        `the failure must name the llm_protocol input; ${resultDescription(result)}`
+      );
+    } finally {
+      removeFixture(fixture);
+    }
+  }
+}
+
+function testValidateResolvesOneProtocol() {
+  // Every combination a caller can express collapses to a single exported
+  // protocol, so no later step ever has two inputs to reconcile.
+  const cases = [
+    { llm_protocol: "", llm_use_anthropic: "", expected: "anthropic" },
+    { llm_protocol: "", llm_use_anthropic: "true", expected: "anthropic" },
+    { llm_protocol: "", llm_use_anthropic: "YES", expected: "anthropic" },
+    { llm_protocol: "", llm_use_anthropic: "false", expected: "openai" },
+    { llm_protocol: "OpenAI-Responses", llm_use_anthropic: "", expected: "openai-responses" },
+    { llm_protocol: "openai-responses", llm_use_anthropic: "false", expected: "openai-responses" },
+    { llm_protocol: "anthropic", llm_use_anthropic: "true", expected: "anthropic" },
+  ];
+  const validate = stepNamed("Validate inputs");
+  assert.ok(validate, "action.yml must retain the Validate inputs step");
+  for (const { expected, ...overrides } of cases) {
+    const fixture = makeFixture();
+    try {
+      const result = runStep(validate, inputValues(overrides), fixture);
+      assert.strictEqual(result.status, 0, `Validate inputs rejected ${JSON.stringify(overrides)}; ${resultDescription(result)}`);
+      assert.strictEqual(
+        readEnvAssignments(path.join(fixture.dir, "github-env")).LLM_PROTOCOL,
+        expected,
+        `${JSON.stringify(overrides)} must resolve to ${expected}`
+      );
+    } finally {
+      removeFixture(fixture);
+    }
+  }
+}
+
+function testValidateRejectsContradictoryProtocolInputs() {
+  // The legacy toggle only ever said "Anthropic or not", so it is only a
+  // contradiction on that axis — openai-responses next to false is a
+  // refinement and must stay accepted (covered above).
+  const validate = stepNamed("Validate inputs");
+  assert.ok(validate, "action.yml must retain the Validate inputs step");
+  for (const overrides of [
+    { llm_protocol: "anthropic", llm_use_anthropic: "false" },
+    { llm_protocol: "openai-responses", llm_use_anthropic: "true" },
+    { llm_protocol: "openai", llm_use_anthropic: "1" },
+  ]) {
+    const fixture = makeFixture();
+    try {
+      const result = runStep(validate, inputValues(overrides), fixture);
+      assert.notStrictEqual(result.status, 0, `Validate inputs must reject ${JSON.stringify(overrides)}`);
+      assert.match(
+        `${result.stdout}\n${result.stderr}`,
+        /::error::llm_protocol '[^']*' contradicts llm_use_anthropic/,
+        `the failure must name both inputs; ${resultDescription(result)}`
+      );
+    } finally {
+      removeFixture(fixture);
+    }
+  }
+}
+
+function testProtocolAllowlistMirrorsTheCLI() {
+  const protocolSource = fs.readFileSync(path.join(ROOT, "internal/llm/protocol.go"), "utf8");
+  const validate = protocolSource.match(/func ValidateProtocol[\s\S]*?\n}/);
+  assert.ok(validate, "protocol.go must expose ValidateProtocol");
+  const constants = new Map(
+    [...protocolSource.matchAll(/^\t(Protocol[A-Za-z]+)\s*=\s*"([^"]+)"$/gm)].map((m) => [m[1], m[2]])
+  );
+  const cliProtocols = new Set(
+    [...validate[0].matchAll(/Protocol[A-Za-z]+/g)].map((m) => constants.get(m[0])).filter(Boolean)
+  );
+  assert.ok(cliProtocols.size >= 3, "ValidateProtocol must name the protocol constants");
+  // Ambient-auth transports are deliberately not selectable through an input
+  // that only carries a url and a token; everything else must be reachable.
+  cliProtocols.delete("anthropic-bedrock");
+  const allowlist = ACTION_TEXT.match(/^\s*""\|(anthropic[a-z|-]*)\)\s*;;$/m);
+  assert.ok(allowlist, "action.yml must keep the llm_protocol case allowlist");
+  assert.deepStrictEqual(
+    allowlist[1].split("|").sort(),
+    [...cliProtocols].sort(),
+    "the llm_protocol allowlist must mirror ValidateProtocol minus anthropic-bedrock"
+  );
+}
+
+function testConfigureAppliesResponsesProtocol() {
+  const configure = stepNamed("Configure OCR");
+  assert.ok(configure, "action.yml must retain the Configure OCR step");
+  const fixture = makeFixture();
+  try {
+    const values = inputValues({
+      llm_url: "https://llm.example.invalid/v1",
+      llm_model: "contract-model",
+      llm_use_anthropic: "true",
+      llm_auth_token: "unused-token",
+    });
+    // llm_protocol beats the toggle, and the config file is what carries it:
+    // the CLI resolves the config file before the environment.
+    const result = runConfigure(values, fixture, { LLM_PROTOCOL: "openai-responses" });
+    assert.strictEqual(result.status, 0, `Configure OCR failed for llm_protocol=openai-responses; ${resultDescription(result)}`);
+    const configured = configValues(configOperations(fixture));
+    assert.strictEqual(configured["llm.protocol"], "openai-responses");
+    assert.strictEqual(configured["llm.use_anthropic"], "false");
+  } finally {
+    removeFixture(fixture);
+  }
+}
+
+function testConfigureRejectsReasoningEffortOnResponses() {
+  const configure = stepNamed("Configure OCR");
+  assert.ok(configure, "action.yml must retain the Configure OCR step");
+  const fixture = makeFixture();
+  try {
+    const values = inputValues({
+      llm_url: "https://llm.example.invalid/v1",
+      llm_model: "contract-model",
+      llm_use_anthropic: "false",
+      llm_auth_token: "unused-token",
+    });
+    const result = runConfigure(values, fixture, {
+      LLM_PROTOCOL: "openai-responses",
+      LLM_REASONING_EFFORT: "high",
+    });
+    assert.notStrictEqual(result.status, 0, "Configure OCR must reject llm_reasoning_effort on the openai-responses protocol");
+    assert.match(
+      `${result.stdout}\n${result.stderr}`,
+      /::error::llm_reasoning_effort is supported only with the openai \(Chat Completions\) protocol/,
       `the failure must name the llm_reasoning_effort input; ${resultDescription(result)}`
     );
   } finally {
@@ -975,7 +1146,7 @@ function testConfigureRejectsMalformedExtraBodyWithActionableError() {
       llm_auth_token: "unused-token",
       llm_extra_body: "{not json",
     });
-    const result = runStep(configure, values, fixture, { LLM_REASONING_EFFORT: "low" });
+    const result = runConfigure(values, fixture, { LLM_REASONING_EFFORT: "low" });
     assert.notStrictEqual(result.status, 0, "Configure OCR must fail on malformed llm_extra_body");
     assert.match(
       `${result.stdout}\n${result.stderr}`,
@@ -1000,7 +1171,7 @@ function testConfigureRejectsNonObjectExtraBody() {
         llm_auth_token: "unused-token",
         llm_extra_body: extraBody,
       });
-      const result = runStep(configure, values, fixture, { LLM_REASONING_EFFORT: "low" });
+      const result = runConfigure(values, fixture, { LLM_REASONING_EFFORT: "low" });
       assert.notStrictEqual(
         result.status,
         0,
@@ -1031,7 +1202,7 @@ function testConfigureBuildsCompleteLlmConfig() {
       llm_extra_body: extraBody,
       language: "English",
     });
-    const result = runStep(configure, values, fixture, { OCR_LLM_TOKEN: values.llm_auth_token });
+    const result = runConfigure(values, fixture, { OCR_LLM_TOKEN: values.llm_auth_token });
     assert.strictEqual(result.status, 0, `Configure OCR shell block failed; ${resultDescription(result)}`);
     const configured = configValues(readJsonLines(fixture.configPath));
     assert.strictEqual(configured["llm.url"], values.llm_url);
@@ -1062,7 +1233,7 @@ function testConfigureNeverPersistsToken() {
       llm_auth_token: token,
       llm_extra_body: '{"thinking":{"type":"disabled"}}',
     });
-    const result = runStep(configure, values, fixture, { OCR_LLM_TOKEN: token });
+    const result = runConfigure(values, fixture, { OCR_LLM_TOKEN: token });
     assert.strictEqual(result.status, 0, `Configure OCR shell block failed; ${resultDescription(result)}`);
     const outputAndFiles = [result.stdout, result.stderr];
     for (const file of allFixtureFiles(fixture.dir)) outputAndFiles.push(fs.readFileSync(file, "utf8"));
@@ -1091,7 +1262,7 @@ function testConfigureNeutralizesStaleProviderAndStaticToken() {
       llm_auth_header: "x-api-key",
       llm_extra_body: '{"thinking":{"type":"disabled"}}',
     });
-    const result = runStep(configure, values, fixture);
+    const result = runConfigure(values, fixture);
     assert.strictEqual(result.status, 0, `Configure OCR shell block failed; ${resultDescription(result)}`);
     const operations = configOperations(fixture);
     const unsetProviderIndex = operations.findIndex(
@@ -1132,7 +1303,7 @@ function testConfigureProtocolTracksUseAnthropic() {
         llm_use_anthropic: useAnthropic,
         llm_auth_token: "protocol-token-sentinel",
       });
-      const result = runStep(configure, values, fixture);
+      const result = runConfigure(values, fixture);
       assert.strictEqual(result.status, 0, `Configure OCR failed for llm_use_anthropic=${useAnthropic}; ${resultDescription(result)}`);
       const configured = configValues(configOperations(fixture));
       assert.strictEqual(configured["llm.use_anthropic"], useAnthropic);
@@ -1177,7 +1348,7 @@ function testConfigurePreservesLegacyUseAnthropicResolution() {
         llm_use_anthropic: value,
         llm_auth_token: "legacy-boolean-token-sentinel",
       });
-      const result = runStep(configure, values, fixture);
+      const result = runConfigure(values, fixture);
       assert.strictEqual(
         result.status,
         0,
@@ -1204,7 +1375,7 @@ function testConfigureClearsStaleExtraHeadersBeforeTokenCommand() {
       llm_auth_token: "extra-header-token-sentinel",
       llm_extra_headers: "X-Request-ID=contract-value",
     });
-    const result = runStep(configure, values, fixture);
+    const result = runConfigure(values, fixture);
     assert.strictEqual(result.status, 0, `Configure OCR shell block failed; ${resultDescription(result)}`);
     const operations = configOperations(fixture);
     const unsetProviderIndex = operations.findIndex(
@@ -1236,7 +1407,7 @@ function testConfigureClearsStaleRetryCodesBeforeEndpointConfig() {
       llm_use_anthropic: "false",
       llm_auth_token: "retry-code-token-sentinel",
     });
-    const result = runStep(configure, values, fixture);
+    const result = runConfigure(values, fixture);
     assert.strictEqual(result.status, 0, `Configure OCR shell block failed; ${resultDescription(result)}`);
     const operations = configOperations(fixture);
     const unsetProviderIndex = operations.findIndex(
@@ -1523,13 +1694,14 @@ function testRequiredStepTopologyAndEnvironmentContracts() {
       "EFFORT_INPUT",
       "MAX_TOKENS_BUDGET_INPUT",
       "LLM_REASONING_EFFORT_INPUT",
+      "LLM_PROTOCOL_INPUT",
+      "LLM_USE_ANTHROPIC_INPUT",
       "STREAM_PROGRESS_INPUT",
     ],
     "Install OpenCodeReview": ["OCR_FORK_VERSION"],
     "Configure OCR": [
       "OCR_LLM_URL",
       "OCR_LLM_MODEL",
-      "OCR_USE_ANTHROPIC",
       "OCR_LLM_AUTH_HEADER",
       "OCR_EXTRA_BODY",
       "OCR_LANGUAGE",
@@ -1538,7 +1710,6 @@ function testRequiredStepTopologyAndEnvironmentContracts() {
       "OCR_LLM_URL",
       "OCR_LLM_TOKEN",
       "OCR_LLM_MODEL",
-      "OCR_USE_ANTHROPIC",
       "OCR_LLM_AUTH_HEADER",
       "OCR_LLM_EXTRA_HEADERS",
       "OCR_LLM_TIMEOUT",
@@ -1635,6 +1806,12 @@ const TESTS = [
   ["Configure OCR never persists the token", testConfigureNeverPersistsToken],
   ["Configure OCR neutralizes stale provider and static token", testConfigureNeutralizesStaleProviderAndStaticToken],
   ["Configure OCR sets a protocol consistent with use_anthropic", testConfigureProtocolTracksUseAnthropic],
+  ["Validate inputs rejects an unknown llm_protocol", testValidateRejectsUnknownProtocol],
+  ["the llm_protocol allowlist mirrors the CLI's protocols", testProtocolAllowlistMirrorsTheCLI],
+  ["Validate inputs resolves one protocol from both inputs", testValidateResolvesOneProtocol],
+  ["Validate inputs rejects contradictory protocol inputs", testValidateRejectsContradictoryProtocolInputs],
+  ["Configure OCR applies llm_protocol over use_anthropic", testConfigureAppliesResponsesProtocol],
+  ["Configure OCR rejects reasoning_effort on the openai-responses protocol", testConfigureRejectsReasoningEffortOnResponses],
   ["Configure OCR preserves legacy use_anthropic resolution", testConfigurePreservesLegacyUseAnthropicResolution],
   ["Configure OCR clears stale persisted extra headers", testConfigureClearsStaleExtraHeadersBeforeTokenCommand],
   ["Configure OCR clears stale persisted retry codes", testConfigureClearsStaleRetryCodesBeforeEndpointConfig],

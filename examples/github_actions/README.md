@@ -479,14 +479,15 @@ Comments that have no line info, or that could not be posted inline (e.g. their 
 
 ## Supported LLM Providers
 
-OCR supports both OpenAI and Anthropic API formats:
+`llm_protocol` picks the wire format, and is the only input that does:
 
-- **OpenAI-compatible APIs** (default):
-  - OpenAI (GPT-4o, GPT-4, etc.)
-  - Azure OpenAI
-  - Self-hosted models (vLLM, Ollama, etc.)
-- **Anthropic APIs** (set variable `OCR_LLM_USE_ANTHROPIC=true`, i.e. `llm_use_anthropic: true`):
-  - Anthropic Claude models
+- `openai` — OpenAI Chat Completions (`/v1/chat/completions`): OpenAI, Azure OpenAI, self-hosted models (vLLM, Ollama), and any gateway speaking that shape.
+- `openai-responses` — the OpenAI Responses API (`/v1/responses`), which is what GPT-5.x and o-series models expect. `llm_url` is normalized to end in `/responses`.
+- `anthropic` — the Anthropic Messages API, for Claude models. This is the default when neither protocol input is set.
+
+`llm_use_anthropic` is the older spelling of the same choice and still works: it is read only when `llm_protocol` is empty, and the run fails if the two disagree about Anthropic. It cannot name the Responses API at all, so new workflows should set `llm_protocol` and drop it.
+
+`llm_reasoning_effort` is Chat Completions vocabulary and is accepted only with `llm_protocol: openai`. On the other two protocols the action fails fast — pass the provider's own spelling through `llm_extra_body` instead (`{"thinking": ...}` for Anthropic, `{"reasoning": {"effort": "high"}}` for Responses).
 
 ## Troubleshooting
 
