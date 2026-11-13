@@ -193,16 +193,15 @@ func resolveWorkingDir(input string, requireGit bool) (string, bool, error) {
 }
 
 // llmRuntime bundles the LLM-side state both subcommands need once they've
-// decided to actually run a session: tool definitions, an app-language
+// decided to actually run a session: an app-language
 // adjusted template (mutated in place via ApplyLanguage), the LLM client,
 // the resolved model name, and a fresh comment collector.
 type llmRuntime struct {
-	Client       llm.LLMClient
-	Model        string
-	Provider     string // resolved provider name (non-secret label; empty for non-provider endpoints)
-	PlanToolDefs []llm.ToolDef
-	MainToolDefs []llm.ToolDef
-	Collector    *tool.CommentCollector
+	Client    llm.LLMClient
+	Model     string
+	Provider  string // resolved provider name (non-secret label; empty for non-provider endpoints)
+	Source    string // resolved configuration source (non-secret label)
+	Collector *tool.CommentCollector
 	// RetryCollector observes every LLM HTTP attempt this run makes. It is
 	// created here rather than on the session or the agent because the client is
 	// built before either exists, and it is per-run rather than package-level so
@@ -229,19 +228,12 @@ type llmRuntime struct {
 // so a well-behaved run can never produce one.
 var newRetryCollector = llm.NewRetryCollector
 
-// loadLLMRuntime loads tool defs from toolConfigPath, reads the app config
+// loadLLMRuntime reads the app config
 // from the user's default config path (applying the configured language to
 // tpl — defaulting when the config file is absent), resolves the LLM
 // endpoint (honoring resolveOpts), and
 // returns the runtime bundle. tpl is mutated in place.
-func loadLLMRuntime(tpl *template.Template, toolConfigPath string, resolveOpts llm.ResolveOptions) (*llmRuntime, error) {
-	toolEntries, err := toolsconfig.Load(toolConfigPath)
-	if err != nil {
-		return nil, fmt.Errorf("load tools: %w", err)
-	}
-	planToolDefs := agent.BuildToolDefs(toolEntries, true)
-	mainToolDefs := agent.BuildToolDefs(toolEntries, false)
-
+func loadLLMRuntime(tpl *template.Template, resolveOpts llm.ResolveOptions) (*llmRuntime, error) {
 	cfgPath, err := defaultConfigPath()
 	if err != nil {
 		return nil, err
@@ -274,8 +266,7 @@ func loadLLMRuntime(tpl *template.Template, toolConfigPath string, resolveOpts l
 		Client:         llm.NewLLMClient(ep, retryCollector, rawHolder),
 		Model:          ep.Model,
 		Provider:       ep.Provider,
-		PlanToolDefs:   planToolDefs,
-		MainToolDefs:   mainToolDefs,
+		Source:         ep.Source,
 		Collector:      tool.NewCommentCollector(),
 		RetryCollector: retryCollector,
 		RawHolder:      rawHolder,
@@ -344,18 +335,12 @@ func applyCLIExcludes(cc *commonContext, patterns []string) {
 	cc.FileFilter.Exclude = append(cc.FileFilter.Exclude, patterns...)
 }
 
-// excludeToolDef returns a copy of defs with any entries whose function name
-// matches name removed. Used by `ocr scan` to hide tools that don't make
-// sense in full-scan mode (e.g. file_read_diff).
-func excludeToolDef(defs []llm.ToolDef, name string) []llm.ToolDef {
-	out := make([]llm.ToolDef, 0, len(defs))
-	for _, d := range defs {
-		if d.Function.Name == name {
-			continue
-		}
-		out = append(out, d)
+func loadToolDefs(names []string) ([]llm.ToolDef, error) {
+	entries, err := toolsconfig.LoadDefault()
+	if err != nil {
+		return nil, err
 	}
-	return out
+	return toolsconfig.Resolve(entries, names)
 }
 
 // quietHandle wraps the restorer returned by whichever stdout redirection
@@ -367,12 +352,16 @@ type quietHandle struct {
 }
 
 // isMachineReadable reports whether the output format writes a structured
-// document to stdout that must not be interleaved with progress text. Both
-// json and sarif move [ocr] progress lines off stdout and suppress the trace
-// summary, which is already carried inside the document.
+// document to stdout that must not be interleaved with progress text. json and
+// sarif move [ocr] progress lines off stdout and suppress the trace summary,
+// which is already carried inside the document. html joins them for the second
+// reason resolveOutputWriter consults this: it must not run the exported page
+// through stripAnsiWriter, which would eat the ESC bytes in trace-quoted
+// source. It is not a value validateOutputFormat accepts, so it reaches this
+// function only from `session export`.
 func isMachineReadable(outputFormat string) bool {
 	switch strings.ToLower(strings.TrimSpace(outputFormat)) {
-	case "json", "sarif":
+	case "json", "sarif", "html":
 		return true
 	default:
 		return false
